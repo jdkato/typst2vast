@@ -1,0 +1,21 @@
+[package]
+name = "typst2vast"
+version = "0.1.0"
+edition = "2021"
+description = "CLI to convert Typst to HTML for Vale, parsing without evaluating."
+license = "MIT"
+repository = "https://github.com/jdkato/typst2vast"
+
+[dependencies]
+typst-syntax = "0.13"
+
+[profile.release]
+lto = true
+strip = true
+
+[package.metadata.release]
+allow-branch = ["main"]
+tag-name = "v{{version}}"
+pre-release-commit-message = "release: v{{version}}"
+publish = true
+push = true
