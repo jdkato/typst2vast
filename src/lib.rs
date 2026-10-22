@@ -7,6 +7,7 @@
 //! becomes the element it means; and code mode is dropped, except that a
 //! `[content]` block anywhere inside it is prose and is emitted in place.
 
+use typst_syntax::ast::Equation;
 use typst_syntax::{parse, SyntaxKind, SyntaxNode};
 
 /// Convert one Typst document to HTML.
@@ -146,6 +147,16 @@ impl Emitter {
                 self.para
                     .push_str(&format!("<code>{}</code>", escape(&body)));
             }
+            SyntaxKind::Equation if is_block_equation(node) => {
+                // A display equation ends the text before it: whatever follows
+                // starts afresh, and a linter must not read both as one sentence.
+                self.flush();
+                let body = text_of(node);
+                self.html.push_str(&format!(
+                    "<pre><code>{}</code></pre>\n",
+                    escape(body.trim_matches(|c: char| c == '$' || c.is_whitespace()))
+                ));
+            }
             SyntaxKind::Equation => {
                 let body: String = node
                     .children()
@@ -173,7 +184,26 @@ impl Emitter {
                     self.inline(child);
                 }
             }
+            _ if content_blocks(node) >= 2 => self.code_blocks(node),
             _ => self.code(node),
+        }
+    }
+
+    /// A code expression with several content blocks -- a table's cells, a
+    /// figure's body and caption -- is a layout of separate texts. Each
+    /// becomes its own paragraph, so none runs into its neighbours.
+    fn code_blocks(&mut self, node: &SyntaxNode) {
+        match node.kind() {
+            SyntaxKind::Markup => {
+                self.flush();
+                self.markup(node);
+                self.flush();
+            }
+            _ => {
+                for child in node.children() {
+                    self.code_blocks(child);
+                }
+            }
         }
     }
 
@@ -215,6 +245,19 @@ fn text_of(node: &SyntaxNode) -> String {
         return node.text().to_string();
     }
     node.children().map(text_of).collect()
+}
+
+/// The number of content blocks in a code subtree, not counting those nested
+/// inside another.
+fn content_blocks(node: &SyntaxNode) -> usize {
+    match node.kind() {
+        SyntaxKind::Markup => 1,
+        _ => node.children().map(content_blocks).sum(),
+    }
+}
+
+fn is_block_equation(node: &SyntaxNode) -> bool {
+    node.cast::<Equation>().is_some_and(|e| e.block())
 }
 
 fn is_block_raw(node: &SyntaxNode) -> bool {
