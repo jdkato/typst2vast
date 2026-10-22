@@ -152,3 +152,43 @@ fn html_is_escaped() {
         &[],
     );
 }
+
+#[test]
+fn display_math_ends_the_text_before_it() {
+    let html = to_vale_ast("The bounds satisfy\n$ x <= y $\nThe next sentence.\n");
+    assert!(html.contains("<p>The bounds satisfy</p>"), "{html}");
+    assert!(html.contains("<pre><code>x &lt;= y</code></pre>"), "{html}");
+    assert!(html.contains("<p>The next sentence.</p>"), "{html}");
+}
+
+#[test]
+fn inline_math_stays_in_its_sentence() {
+    has("Inline $x$ math.\n", &["<p>Inline <code>x</code> math.</p>"], &[]);
+}
+
+#[test]
+fn table_cells_and_caption_are_separate_paragraphs() {
+    has(
+        "#figure(\n  table(columns: 2, [cell one], [cell two]),\n  caption: [A caption.],\n)\n",
+        &["<p>cell one</p>", "<p>cell two</p>", "<p>A caption.</p>"],
+        &["cell one  cell two"],
+    );
+}
+
+#[test]
+fn single_content_call_stays_inline() {
+    has(
+        "#link(\"https://pixi.sh\")[Pixi] installs Python.\n",
+        &["<p>Pixi  installs Python.</p>"],
+        &["pixi.sh"],
+    );
+}
+
+#[test]
+fn paragraphs_inside_a_layout_stay_apart() {
+    has(
+        "#grid([First para.\n\nSecond para.], [Other cell.])\n",
+        &["<p>First para.</p>", "<p>Second para.</p>", "<p>Other cell.</p>"],
+        &[],
+    );
+}
