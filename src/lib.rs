@@ -6,6 +6,14 @@
 //! source, so a linter can search any alert back to its position; markup
 //! becomes the element it means; and code mode is dropped, except that a
 //! `[content]` block anywhere inside it is prose and is emitted in place.
+//!
+//! A handful of the standard library's functions are markup by another
+//! name, and are read by their names alone -- nothing is evaluated, so a
+//! document that rebinds `table` is read as if it hadn't: `link`, `image`,
+//! `figure`, `table`, `quote`, `line`, `emph` and `strong` become the
+//! elements they mean, with what they point at (a link's target, an
+//! image's path) in attributes, where a linter's walker doesn't read prose.
+//! A label is its element's `id`.
 
 use typst_syntax::{parse, SyntaxKind, SyntaxNode};
 
@@ -61,7 +69,12 @@ impl Emitter {
 
     /// Walk a `Markup` node at block level.
     fn markup(&mut self, node: &SyntaxNode) {
-        for child in node.children() {
+        let children: Vec<&SyntaxNode> = node.children().collect();
+        let mut skip = None;
+        for (i, child) in children.iter().copied().enumerate() {
+            if skip == Some(i) {
+                continue;
+            }
             match child.kind() {
                 SyntaxKind::Heading => {
                     self.flush();
@@ -71,9 +84,31 @@ impl Emitter {
                         .find(|c| c.kind() == SyntaxKind::HeadingMarker)
                         .map(|m| m.text().len().min(6))
                         .unwrap_or(1);
+                    // `== Title <label>`: the label is the heading's id.
+                    let label = children[i + 1..]
+                        .iter()
+                        .enumerate()
+                        .take_while(|(_, c)| matches!(c.kind(), SyntaxKind::Space | SyntaxKind::Label))
+                        .find(|(_, c)| c.kind() == SyntaxKind::Label)
+                        .map(|(k, c)| (i + 1 + k, label_name(c)));
+                    let id = match &label {
+                        Some((at, name)) => {
+                            skip = Some(*at);
+                            format!(" id=\"{}\"", attr(name))
+                        }
+                        None => String::new(),
+                    };
                     let body = self.collect_inline(child);
                     self.html
-                        .push_str(&format!("<h{level}>{}</h{level}>\n", body.trim()));
+                        .push_str(&format!("<h{level}{id}>{}</h{level}>\n", body.trim()));
+                }
+                SyntaxKind::Equation if is_block_equation(child) => {
+                    self.flush();
+                    self.close_list();
+                    self.html.push_str(&format!(
+                        "<math display=\"block\"><code>{}</code></math>\n",
+                        escape(equation_body(child).trim())
+                    ));
                 }
                 SyntaxKind::ListItem => self.item("ul", child),
                 SyntaxKind::EnumItem => self.item("ol", child),
@@ -147,19 +182,26 @@ impl Emitter {
                     .push_str(&format!("<code>{}</code>", escape(&body)));
             }
             SyntaxKind::Equation => {
-                let body: String = node
-                    .children()
-                    .filter(|c| c.kind() != SyntaxKind::Dollar)
-                    .map(text_of)
-                    .collect();
-                self.para
-                    .push_str(&format!("<code>{}</code>", escape(body.trim())));
+                self.para.push_str(&format!(
+                    "<code>{}</code>",
+                    escape(equation_body(node).trim())
+                ));
             }
             SyntaxKind::Link => {
-                self.para
-                    .push_str(&format!("<a href=\"#\">{}</a>", escape(node.text())));
+                // A bare URL is its own target.
+                self.para.push_str(&format!(
+                    "<a href=\"{}\">{}</a>",
+                    attr(node.text()),
+                    escape(node.text())
+                ));
             }
-            SyntaxKind::Label | SyntaxKind::LineComment | SyntaxKind::BlockComment => {}
+            SyntaxKind::Label => {
+                // A label on anything but a heading: a place to point at.
+                self.para
+                    .push_str(&format!("<a id=\"{}\"></a>", attr(&label_name(node))));
+            }
+            SyntaxKind::FuncCall => self.call(node),
+            SyntaxKind::LineComment | SyntaxKind::BlockComment => {}
             SyntaxKind::Ref => {
                 // The target says nothing; a `[supplement]` is prose.
                 for child in node.children() {
@@ -196,6 +238,163 @@ impl Emitter {
         }
     }
 
+    /// A function call: the standard library's markup functions become
+    /// their elements; any other is code, its content blocks prose.
+    fn call(&mut self, node: &SyntaxNode) {
+        let name = callee(node);
+        let Some(args) = node.children().find(|c| c.kind() == SyntaxKind::Args) else {
+            return self.code(node);
+        };
+        match name.as_str() {
+            "link" => {
+                let Some(href) = first_target(args) else {
+                    return self.code(node);
+                };
+                let body = self.content_of(args);
+                self.para
+                    .push_str(&format!("<a href=\"{}\">{}</a>", attr(&href), body.trim()));
+            }
+            "image" => match image(args) {
+                Some(img) => self.para.push_str(&img),
+                None => self.code(node),
+            },
+            "figure" => {
+                let mut inner = Emitter::default();
+                let mut caption = String::new();
+                for a in args.children() {
+                    match a.kind() {
+                        SyntaxKind::Named if named_key(a) == "caption" => {
+                            let mut c = Emitter::default();
+                            c.code(a);
+                            caption = c.into_inline();
+                        }
+                        SyntaxKind::Named => {}
+                        _ => inner.arg(a),
+                    }
+                }
+                let body = inner.into_inline();
+                self.flush();
+                self.html.push_str("<figure>");
+                self.html.push_str(body.trim());
+                if !caption.trim().is_empty() {
+                    self.html
+                        .push_str(&format!("<figcaption>{}</figcaption>", caption.trim()));
+                }
+                self.html.push_str("</figure>\n");
+            }
+            "table" => self.table(args),
+            "quote" => {
+                let block = args.children().any(|a| {
+                    a.kind() == SyntaxKind::Named
+                        && named_key(a) == "block"
+                        && a.children().any(|v| v.kind() == SyntaxKind::Bool && v.text() == "true")
+                });
+                let body = self.content_of(args);
+                if block {
+                    self.flush();
+                    self.html
+                        .push_str(&format!("<blockquote><p>{}</p></blockquote>\n", body.trim()));
+                } else {
+                    self.para.push_str(&format!("<q>{}</q>", body.trim()));
+                }
+            }
+            "line" => {
+                self.flush();
+                self.html.push_str("<hr>\n");
+            }
+            "emph" | "strong" => {
+                let tag = if name == "emph" { "em" } else { "strong" };
+                let body = self.content_of(args);
+                self.para
+                    .push_str(&format!("<{tag}>{}</{tag}>", body.trim()));
+            }
+            _ => self.code(node),
+        }
+    }
+
+    /// An argument in a call that holds content: a nested call is read as
+    /// one, anything else as code.
+    fn arg(&mut self, node: &SyntaxNode) {
+        match node.kind() {
+            SyntaxKind::FuncCall => self.call(node),
+            _ => self.code(node),
+        }
+    }
+
+    /// The prose in a call's content blocks, as inline HTML.
+    fn content_of(&mut self, args: &SyntaxNode) -> String {
+        let mut inner = Emitter::default();
+        for a in args.children() {
+            if a.kind() == SyntaxKind::ContentBlock {
+                inner.code(a);
+            }
+        }
+        inner.into_inline()
+    }
+
+    fn into_inline(self) -> String {
+        let mut body = self.html;
+        body.push_str(&self.para);
+        body
+    }
+
+    /// `table(columns: n, ..cells)`: rows of n cells; `table.header`'s
+    /// cells are a row of headers.
+    fn table(&mut self, args: &SyntaxNode) {
+        let columns = args
+            .children()
+            .find(|a| a.kind() == SyntaxKind::Named && named_key(a) == "columns")
+            .map(column_count)
+            .unwrap_or(1)
+            .max(1);
+        let mut head: Vec<String> = Vec::new();
+        let mut cells: Vec<String> = Vec::new();
+        for a in args.children() {
+            match a.kind() {
+                SyntaxKind::ContentBlock => cells.push(cell(a)),
+                SyntaxKind::FuncCall => {
+                    let name = callee(a);
+                    let Some(inner) = a.children().find(|c| c.kind() == SyntaxKind::Args) else {
+                        continue;
+                    };
+                    match name.as_str() {
+                        "table.header" => head.extend(
+                            inner
+                                .children()
+                                .filter(|c| c.kind() == SyntaxKind::ContentBlock)
+                                .map(cell),
+                        ),
+                        "table.hline" | "table.vline" => {}
+                        // `table.cell(colspan: 2)[..]`, or any call that
+                        // makes a cell's content.
+                        _ => {
+                            let mut e = Emitter::default();
+                            e.arg(a);
+                            cells.push(e.into_inline().trim().to_string());
+                        }
+                    }
+                }
+                _ => {}
+            }
+        }
+        self.flush();
+        self.html.push_str("<table>\n");
+        let row = |tag: &str, cells: &[String], html: &mut String| {
+            html.push_str("<tr>");
+            for c in cells {
+                html.push_str(&format!("<{tag}>{c}</{tag}>"));
+            }
+            html.push_str("</tr>\n");
+        };
+        for r in head.chunks(columns) {
+            row("th", r, &mut self.html);
+        }
+        for r in cells.chunks(columns) {
+            row("td", r, &mut self.html);
+        }
+        self.html.push_str("</table>\n");
+    }
+
     fn styled(&mut self, node: &SyntaxNode, tag: &str) {
         let mut inner = Emitter::default();
         for child in node.children() {
@@ -207,6 +406,98 @@ impl Emitter {
         self.para
             .push_str(&format!("<{tag}>{}</{tag}>", body.trim()));
     }
+}
+
+/// A cell's content, as inline HTML.
+fn cell(block: &SyntaxNode) -> String {
+    let mut e = Emitter::default();
+    e.code(block);
+    e.into_inline().trim().to_string()
+}
+
+/// The function a call names: `table`, or `table.header`.
+fn callee(call: &SyntaxNode) -> String {
+    match call.children().next() {
+        Some(c) if matches!(c.kind(), SyntaxKind::Ident | SyntaxKind::FieldAccess) => text_of(c),
+        _ => String::new(),
+    }
+}
+
+fn named_key(named: &SyntaxNode) -> String {
+    named
+        .children()
+        .find(|c| c.kind() == SyntaxKind::Ident)
+        .map(|c| c.text().to_string())
+        .unwrap_or_default()
+}
+
+/// A string literal's value.
+fn string(node: &SyntaxNode) -> String {
+    let t = node.text();
+    let inner = t.strip_prefix('"').and_then(|t| t.strip_suffix('"')).unwrap_or(t);
+    inner.replace("\\\"", "\"").replace("\\\\", "\\")
+}
+
+/// `<name>` without its angle brackets.
+fn label_name(node: &SyntaxNode) -> String {
+    node.text().trim_start_matches('<').trim_end_matches('>').to_string()
+}
+
+/// A link's target: its first argument, a string or a label.
+fn first_target(args: &SyntaxNode) -> Option<String> {
+    args.children().find_map(|a| match a.kind() {
+        SyntaxKind::Str => Some(string(a)),
+        SyntaxKind::Label => Some(format!("#{}", label_name(a))),
+        _ => None,
+    })
+}
+
+/// `image("path", alt: "..")` as an `img`.
+fn image(args: &SyntaxNode) -> Option<String> {
+    let src = args.children().find(|a| a.kind() == SyntaxKind::Str).map(string)?;
+    let alt = args
+        .children()
+        .find(|a| a.kind() == SyntaxKind::Named && named_key(a) == "alt")
+        .and_then(|a| a.children().find(|v| v.kind() == SyntaxKind::Str).map(string))
+        .unwrap_or_default();
+    Some(format!("<img src=\"{}\" alt=\"{}\">", attr(&src), attr(&alt)))
+}
+
+/// `columns: 3`, or `columns: (1fr, 2fr, auto)`.
+fn column_count(named: &SyntaxNode) -> usize {
+    for v in named.children() {
+        match v.kind() {
+            SyntaxKind::Int => return v.text().parse().unwrap_or(1),
+            SyntaxKind::Array => {
+                return v
+                    .children()
+                    .filter(|c| {
+                        !matches!(
+                            c.kind(),
+                            SyntaxKind::LeftParen | SyntaxKind::RightParen | SyntaxKind::Comma | SyntaxKind::Space
+                        )
+                    })
+                    .count()
+            }
+            _ => {}
+        }
+    }
+    1
+}
+
+/// `$ x $`, with space inside its dollars, is set on its own line.
+fn is_block_equation(node: &SyntaxNode) -> bool {
+    let kids: Vec<&SyntaxNode> = node.children().collect();
+    kids.len() >= 4
+        && kids[1].kind() == SyntaxKind::Space
+        && kids[kids.len() - 2].kind() == SyntaxKind::Space
+}
+
+fn equation_body(node: &SyntaxNode) -> String {
+    node.children()
+        .filter(|c| c.kind() != SyntaxKind::Dollar)
+        .map(text_of)
+        .collect()
 }
 
 /// The source text of a whole subtree.
@@ -230,6 +521,10 @@ fn raw_body(node: &SyntaxNode) -> String {
         .filter(|c| !matches!(c.kind(), SyntaxKind::RawDelim | SyntaxKind::RawLang))
         .map(text_of)
         .collect()
+}
+
+fn attr(s: &str) -> String {
+    escape(s).replace('"', "&quot;")
 }
 
 fn escape(s: &str) -> String {

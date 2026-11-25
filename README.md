@@ -6,6 +6,7 @@ Documents are read with [`typst-syntax`](https://crates.io/crates/typst-syntax) 
 
 - Prose is emitted byte-for-byte from the source, so a linter can search any alert back to its position.
 - Markup becomes the element it means: `=` headings, `*strong*`, `_emphasis_`, lists and term lists, raw text and math as skipped code.
+- Structure is kept: a label is an `id`, `#link` keeps its target in `href`, and `#image`, `#figure`, `#table`, `#quote`, `#line`, and block math become the elements they mean. These functions are read by name; nothing is evaluated.
 - Code mode is dropped, except that a `[content]` block anywhere inside it — a figure's caption, a conditional's branches, a `#let`-bound body — is prose and is emitted in place.
 
 Because nothing is compiled: a document that doesn't build still converts, no package is ever fetched, and no `#show` rule can make the converted text differ from the source.

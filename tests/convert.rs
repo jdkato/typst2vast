@@ -18,8 +18,8 @@ fn has(doc: &str, want: &[&str], absent: &[&str]) {
 fn headings() {
     has(
         "= Top\n\n== Deeper <sec-label>\n\nProse.\n",
-        &["<h1>Top</h1>", "<h2>Deeper</h2>", "<p>Prose.</p>"],
-        &["sec-label"],
+        &["<h1>Top</h1>", "<h2 id=\"sec-label\">Deeper</h2>", "<p>Prose.</p>"],
+        &["&lt;sec-label", ">sec-label"],
     );
 }
 
@@ -63,8 +63,8 @@ fn lists() {
 fn labels_and_refs_are_markup() {
     has(
         "As @intro shows <the-label>, prose continues.\n",
-        &["prose continues."],
-        &["intro", "the-label"],
+        &["prose continues.", "<a id=\"the-label\"></a>"],
+        &["intro", ">the-label", "&lt;the-label"],
     );
 }
 
@@ -99,8 +99,8 @@ fn code_mode_is_masked() {
 fn content_blocks_in_code_are_prose() {
     has(
         "#figure(\n  image(\"f.png\"),\n  caption: [A caption sentence.],\n)\n\n#align(center)[Centered prose.]\n",
-        &["A caption sentence.", "Centered prose."],
-        &["f.png", "center)"],
+        &["<figcaption>A caption sentence.</figcaption>", "Centered prose.", "<img src=\"f.png\""],
+        &[">f.png", "center)"],
     );
 }
 
@@ -150,5 +150,59 @@ fn html_is_escaped() {
         "Angle <brackets> & ampersands.\n",
         &["&amp; ampersands."],
         &[],
+    );
+}
+
+#[test]
+fn links_keep_their_targets() {
+    has(
+        "See #link(\"guide.typ\")[the guide], #link(<intro>)[above] and https://vale.sh today.\n",
+        &[
+            "<a href=\"guide.typ\">the guide</a>",
+            "<a href=\"#intro\">above</a>",
+            "<a href=\"https://vale.sh\">https://vale.sh</a>",
+        ],
+        &[">guide.typ", "link("],
+    );
+}
+
+#[test]
+fn images_and_figures() {
+    has(
+        "#image(\"plot.png\", alt: \"A plot\")\n\n#figure(\n  image(\"f.png\", alt: \"F\"),\n  caption: [The _plot_],\n) <fig>\n",
+        &[
+            "<img src=\"plot.png\" alt=\"A plot\">",
+            "<figure><img src=\"f.png\" alt=\"F\"><figcaption>The <em>plot</em></figcaption></figure>",
+            "<a id=\"fig\"></a>",
+        ],
+        &[],
+    );
+}
+
+#[test]
+fn tables_have_rows() {
+    has(
+        "#table(\n  columns: (1fr, auto),\n  table.header[Name][Use],\n  [Vale], [Lints *prose*],\n  table.cell(colspan: 2)[Wide],\n)\n",
+        &[
+            "<tr><th>Name</th><th>Use</th></tr>",
+            "<tr><td>Vale</td><td>Lints <strong>prose</strong></td></tr>",
+            "<tr><td>Wide</td></tr>",
+        ],
+        &["1fr", "colspan"],
+    );
+}
+
+#[test]
+fn quotes_rules_and_block_math() {
+    has(
+        "#quote(block: true)[Quoted words.]\n\nHe said #quote[so].\n\n#line(length: 100%)\n\n$ E = m c^2 $\n\nInline $x^2$ stays.\n",
+        &[
+            "<blockquote><p>Quoted words.</p></blockquote>",
+            "<q>so</q>",
+            "<hr>",
+            "<math display=\"block\"><code>E = m c^2</code></math>",
+            "Inline <code>x^2</code> stays.",
+        ],
+        &["100%"],
     );
 }
