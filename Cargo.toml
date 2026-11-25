@@ -1,6 +1,6 @@
 [package]
 name = "typst2vast"
-version = "0.1.0"
+version = "0.2.0"
 edition = "2021"
 description = "CLI to convert Typst to HTML for Vale, parsing without evaluating."
 license = "MIT"
